@@ -418,7 +418,7 @@ export default function Home() {
 
                       <td>
                         {fmtTime(
-                          r.simulationTime / 1
+                          r.simulationTime / 1000
                         )}
                       </td>
 
