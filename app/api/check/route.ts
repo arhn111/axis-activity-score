@@ -14,9 +14,16 @@ export async function GET(req: NextRequest) {
 
     const data = await getWalletData(wallet);
 
-    return NextResponse.json(data, {
-      headers: { "Cache-Control": "no-store" },
-    });
+   return NextResponse.json(
+  JSON.parse(
+    JSON.stringify(data, (_, value) =>
+      typeof value === "bigint" ? value.toString() : value
+    )
+  ),
+  {
+    headers: { "Cache-Control": "no-store" },
+  }
+);
   } catch (e: any) {
     return NextResponse.json(
       { error: e?.message || "Unable to read Base data" },
