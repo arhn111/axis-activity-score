@@ -6,7 +6,7 @@ export async function GET(req: NextRequest) {
     const wallet = req.nextUrl.searchParams.get("wallet") || "";
     if (!wallet) return NextResponse.json({error:"Wallet address is required"}, {status:400});
     const data = await getWalletData(wallet);
-    return NextResponse.json(data, {headers:{"Cache-Control":"public, s-maxage=30, stale-while-revalidate=120"}});
+    return NextResponse.json(data, {headers:{"Cache-Control":"no-store"}});
   } catch (e:any) {
     return NextResponse.json({error:e?.message || "Unable to read Base data"}, {status:400});
   }
