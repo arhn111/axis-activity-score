@@ -52,7 +52,7 @@ export function calculateMetrics(records: RecordItem[]) {
   const volumeScore = normalize(signed, 30);
 
   const activeDays = new Set(valid.map(r => new Date(r.timestamp*1000).toISOString().slice(0,10)));
-  const sortedDays = [...activeDays].sort();
+  const sortedDays = Array.from(activeDays).sort();
   let bestStreak = 0, current = 0, prev = "";
   for (const day of sortedDays) {
     if (!prev) current = 1;
