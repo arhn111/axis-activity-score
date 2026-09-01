@@ -33,7 +33,13 @@ const fmtTime=(s:number)=>{
   return `${m}m ${sec.toString().padStart(2,"0")}s`;
 };
 const short=(n:number)=>n.toLocaleString();
-
+function getRank(score: number) {
+  if (score <= 30) return "Newbie";
+  if (score <= 50) return "Degen";
+  if (score <= 70) return "Alpha";
+  if (score <= 90) return "Legend";
+  return "Legend+";
+}
 export default function Home(){
   const [wallet,setWallet]=useState("");
   const [data,setData]=useState<Data|null>(null);
@@ -179,8 +185,17 @@ export default function Home(){
         <div className="confetti c1">✦</div><div className="confetti c2">◆</div><div className="confetti c3">✦</div>
         <h2>Score fetched successfully!</h2>
         <p>Here’s your Axis Robotics Activity Score</p>
-        <div className="modalScore"><strong>{m.activityScore}</strong><span>/100</span></div>
-        <div className="modalRole">{m.activityScore>=80?"ELITE":m.activityScore>=60?"OPERATOR":m.activityScore>=40?"TECHNICIAN":"STARTER"}</div>
+       <div className="modalRole">
+  {m.activityScore <= 30
+    ? "NEWBIE"
+    : m.activityScore <= 50
+    ? "DEGEN"
+    : m.activityScore <= 70
+    ? "ALPHA"
+    : m.activityScore <= 90
+    ? "LEGEND"
+    : "LEGEND+"}
+</div>
         <button className="modalBtn" onClick={()=>{setShowModal(false);setTimeout(()=>document.getElementById("result")?.scrollIntoView({behavior:"smooth"}),50)}}>View Full Dashboard <ArrowUpRight size={18}/></button>
       </div>
     </div>}
