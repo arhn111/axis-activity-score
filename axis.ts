@@ -7,20 +7,27 @@ import {
 } from "viem";
 import { base } from "viem/chains";
 
+/**
+ * Axis Robotics Activity Score
+ *
+ * IMPORTANT:
+ * All activity data is read directly from the Axis Robotics
+ * contract on Base.
+ */
+
 export const CONTRACT =
   "0xF91A90baA9E044Da084df369445A59D859d640dB" as Address;
 
-// Base Mainnet RPC.
-// Environment variable हो तो उसे use करेगा,
-// वरना public Base RPC fallback रहेगा.
-const RPC_URL =
-  process.env.BASE_RPC_URL || "https://mainnet.base.org";
+const RPC_URL = "https://mainnet.base.org";
 
 const client = createPublicClient({
   chain: base,
   transport: http(RPC_URL),
 });
 
+/**
+ * Axis contract ABI
+ */
 const ABI = parseAbi([
   "function getUserRecords(address user) view returns (uint256[])",
   "function records(uint256) view returns (uint256 dataId, uint256 taskId, address user, uint256 score, uint256 simulationTime, uint256 timestamp, bool invalidated)",
@@ -35,22 +42,17 @@ export type RecordItem = {
   invalidated: boolean;
 };
 
-const clamp = (n: number, min = 0, max = 100) =>
-  Math.max(min, Math.min(max, n));
-
-function normalize(value: number, cap: number) {
-  return clamp((value / cap) * 100);
-}
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
- * Retry helper.
+ * Retry an RPC request.
  *
- * Axis data हमेशा उसी Axis contract से पढ़ा जाता है.
- * Retry सिर्फ RPC request failure / rate limit के लिए है.
+ * Handles Base public RPC 429/rate-limit errors.
  */
 async function readWithRetry<T>(
   fn: () => Promise<T>,
-  retries = 4
+  retries = 5,
 ): Promise<T> {
   let lastError: unknown;
 
@@ -61,16 +63,13 @@ async function readWithRetry<T>(
       lastError = error;
 
       if (attempt === retries) {
-        throw error;
+        break;
       }
 
-      // Exponential backoff:
-      // 1s -> 2s -> 4s -> 8s
-      const delay = 1000 * 2 ** attempt;
+      // 1s -> 2s -> 4s -> 8s -> 16s
+      const delay = 1000 * Math.pow(2, attempt);
 
-      await new Promise((resolve) =>
-        setTimeout(resolve, delay)
-      );
+      await sleep(delay);
     }
   }
 
@@ -78,17 +77,30 @@ async function readWithRetry<T>(
 }
 
 /**
- * Small delay between individual Axis record calls.
- * This prevents Base public RPC 429 errors.
+ * Small delay between Axis record RPC calls.
+ *
+ * This is intentionally conservative because
+ * mainnet.base.org can return HTTP 429.
  */
-async function rpcDelay(ms = 250) {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+async function rpcDelay() {
+  await sleep(500);
+}
+
+const clamp = (
+  n: number,
+  min = 0,
+  max = 100,
+) => Math.max(min, Math.min(max, n));
+
+function normalize(value: number, cap: number) {
+  if (cap <= 0) return 0;
+  return clamp((value / cap) * 100);
 }
 
 /**
- * Axis Activity Score calculation.
+ * Calculate Axis activity metrics.
  *
- * Same model as the current checker:
+ * Model:
  *
  * 30% signed trajectories
  * 25% verified
@@ -97,104 +109,175 @@ async function rpcDelay(ms = 250) {
  * 10% consistency
  */
 export function calculateMetrics(records: RecordItem[]) {
+  /**
+   * Only non-invalidated Axis records count.
+   */
   const valid = records.filter((r) => !r.invalidated);
 
+  /**
+   * Number of signed trajectories.
+   */
   const signed = valid.length;
 
-  const verified = records.length
-    ? (valid.length / records.length) * 100
-    : 0;
+  /**
+   * Verification percentage.
+   *
+   * If a record exists but is invalidated, it is treated
+   * as not verified.
+   */
+  const verified =
+    records.length > 0
+      ? (valid.length / records.length) * 100
+      : 0;
 
-  const avgScore = valid.length
-    ? valid.reduce((sum, r) => sum + r.score, 0) / valid.length
-    : 0;
+  /**
+   * Average Axis task score.
+   */
+  const avgScore =
+    valid.length > 0
+      ? valid.reduce((sum, r) => sum + r.score, 0) / valid.length
+      : 0;
 
+  /**
+   * Unique Axis tasks.
+   */
   const tasks = new Set(
-    valid.map((r) => r.taskId.toString())
+    valid.map((r) => r.taskId.toString()),
   );
 
+  /**
+   * Diversity:
+   * 25 unique tasks = 100.
+   */
   const diversity = normalize(tasks.size, 25);
 
-  const quality = avgScore;
+  /**
+   * Quality is the average score reported by Axis.
+   */
+  const quality = clamp(avgScore);
 
-  // Active days
+  /**
+   * Activity volume.
+   *
+   * 30 valid trajectories = 100.
+   */
+  const volumeScore = normalize(signed, 30);
+
+  /**
+   * Active days.
+   */
   const activeDays = new Set(
     valid.map((r) =>
       new Date(r.timestamp * 1000)
         .toISOString()
-        .slice(0, 10)
-    )
+        .slice(0, 10),
+    ),
   );
 
   const sortedDays = Array.from(activeDays).sort();
 
+  /**
+   * Best consecutive-day streak.
+   */
   let bestStreak = 0;
-  let currentStreak = 0;
-  let previousDay = "";
+  let current = 0;
+  let previous = "";
 
   for (const day of sortedDays) {
-    if (!previousDay) {
-      currentStreak = 1;
+    if (!previous) {
+      current = 1;
     } else {
-      const a = new Date(`${previousDay}T00:00:00Z`).getTime();
+      const a = new Date(`${previous}T00:00:00Z`).getTime();
       const b = new Date(`${day}T00:00:00Z`).getTime();
 
-      currentStreak =
-        b - a === 86400000
-          ? currentStreak + 1
-          : 1;
+      const difference = b - a;
+
+      if (difference === 86400000) {
+        current += 1;
+      } else {
+        current = 1;
+      }
     }
 
-    bestStreak = Math.max(bestStreak, currentStreak);
-    previousDay = day;
+    bestStreak = Math.max(bestStreak, current);
+    previous = day;
   }
 
+  /**
+   * Consistency:
+   *
+   * 12 active days -> 60 points
+   * 8-day streak -> 40 points
+   *
+   * Maximum = 100.
+   */
   const consistency = clamp(
-    Math.min(activeDays.size / 12, 1) * 60 +
-      Math.min(bestStreak / 8, 1) * 40
+    Math.min(activeDays.size, 12) * 5 +
+      Math.min(bestStreak, 8) * 5,
   );
 
-  const volumeScore = normalize(signed, 30);
-
+  /**
+   * Final Axis Activity Score.
+   */
   const activityScore = Math.round(
     volumeScore * 0.30 +
       verified * 0.25 +
       quality * 0.25 +
       diversity * 0.10 +
-      consistency * 0.10
+      consistency * 0.10,
   );
 
-  const fastest = valid.length
-    ? Math.min(
-        ...valid.map((r) => r.simulationTime)
-      ) / 1000
-    : 0;
+  /**
+   * Simulation time metrics.
+   */
+  const fastest =
+    valid.length > 0
+      ? Math.min(
+          ...valid.map(
+            (r) => r.simulationTime / 1000,
+          ),
+        )
+      : 0;
 
-  const slowest = valid.length
-    ? Math.max(
-        ...valid.map((r) => r.simulationTime)
-      ) / 1000
-    : 0;
+  const slowest =
+    valid.length > 0
+      ? Math.max(
+          ...valid.map(
+            (r) => r.simulationTime / 1000,
+          ),
+        )
+      : 0;
 
-  const totalTime = valid.reduce(
-    (sum, r) => sum + r.simulationTime,
-    0
-  ) / 1000;
+  const totalTime =
+    valid.length > 0
+      ? valid.reduce(
+          (sum, r) => sum + r.simulationTime,
+          0,
+        ) / 1000
+      : 0;
 
   return {
     trajectories: signed,
+    signed,
+
     verified,
     avgScore,
     quality,
+
     diversity,
     tasks: tasks.size,
+
     activeDays: activeDays.size,
     bestStreak,
+
     fastest,
     slowest,
     totalTime,
+
     consistency,
+
     activityScore,
+
     records: valid,
   };
 }
@@ -203,7 +286,7 @@ export function calculateMetrics(records: RecordItem[]) {
  * Read Axis data for a wallet.
  *
  * IMPORTANT:
- * Data is read directly from the Axis Robotics contract.
+ * This function reads ONLY from the Axis Robotics contract.
  */
 export async function getWalletData(wallet: string) {
   if (!isAddress(wallet)) {
@@ -212,44 +295,86 @@ export async function getWalletData(wallet: string) {
 
   const user = wallet as Address;
 
-  // Step 1:
-  // Ask the Axis contract which records belong to this wallet.
+  /**
+   * STEP 1
+   *
+   * Ask the Axis contract which record IDs belong
+   * to this wallet.
+   */
   const ids = await readWithRetry(() =>
     client.readContract({
       address: CONTRACT,
       abi: ABI,
       functionName: "getUserRecords",
       args: [user],
-    })
+    }),
   );
+
+  /**
+   * No Axis records.
+   */
+  if (!ids || ids.length === 0) {
+    return {
+      wallet: user,
+      records: [],
+      metrics: calculateMetrics([]),
+    };
+  }
 
   const records: RecordItem[] = [];
 
-  // Step 2:
-  // Read each Axis record.
-  // Delay + retry prevents Base RPC 429.
+  /**
+   * STEP 2
+   *
+   * Read every Axis record individually.
+   *
+   * Sequential requests are intentional.
+   * This prevents Base RPC 429 errors.
+   */
   for (const id of ids) {
-    const r = await readWithRetry(() =>
-      client.readContract({
-        address: CONTRACT,
-        abi: ABI,
-        functionName: "records",
-        args: [id],
-      })
-    );
+    try {
+      const r = await readWithRetry(() =>
+        client.readContract({
+          address: CONTRACT,
+          abi: ABI,
+          functionName: "records",
+          args: [id],
+        }),
+      );
 
-    records.push({
-      dataId: r[0],
-      taskId: r[1],
-      score: Number(r[3]),
-      simulationTime: Number(r[4]),
-      timestamp: Number(r[5]),
-      invalidated: Boolean(r[6]),
-    });
+      records.push({
+        dataId: r[0],
+        taskId: r[1],
+        score: Number(r[3]),
+        simulationTime: Number(r[4]),
+        timestamp: Number(r[5]),
+        invalidated: Boolean(r[6]),
+      });
+    } catch (error) {
+      /**
+       * If one Axis record fails after all retries,
+       * continue with the remaining Axis records.
+       *
+       * This prevents the UI from staying in Loading forever.
+       */
+      console.warn(
+        `Axis record ${id.toString()} failed`,
+        error,
+      );
+    }
 
-    await rpcDelay(250);
+    /**
+     * Important for Base public RPC rate limiting.
+     */
+    await rpcDelay();
   }
 
+  /**
+   * STEP 3
+   *
+   * Calculate score ONLY from the Axis records
+   * successfully read above.
+   */
   return {
     wallet: user,
     records,
